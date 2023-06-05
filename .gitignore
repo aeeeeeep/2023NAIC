@@ -1,0 +1,16 @@
+video_results/
+__pycache__/
+.idea/
+wandb/
+weight/
+*.pth
+*.bin
+*.trt
+*.pt
+*.un*
+*.tar.gz
+*.gz
+*.zip
+*.rar
+*.7z
+*.swp
