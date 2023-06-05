@@ -128,13 +128,13 @@ class VideoDataset(Dataset):
         n_samples = len(self.file_list)
         split_idx = int(n_samples * val_ratio)
         if train:
-            self.file_list = self.file_list[split_idx:]
+            self.file_list = self.file_list
             with open(label_path, 'r') as f:
                 labels = eval(f.read())
                 self.labels = labels
         else:
             if label_path is not None:
-                self.file_list = self.file_list[:split_idx]
+                self.file_list = self.file_list
                 with open(label_path, 'r') as f:
                     labels = eval(f.read())
                 self.labels = labels
@@ -312,37 +312,20 @@ def train(args):
         logging = f'Training results for epoch -- {epoch}: Epoch_Rec:{epoch_rec}'
         logger.cprint(logging)
         scheduler.step()
+        
         model.eval()
-        total_correct = 0
-        total_samples = 0
-        with torch.no_grad():
-            for inputs, targets in tqdm(val_dataloader, desc='Epoch:{:d} val'.format(epoch)):
-                inputs = inputs.to(device)
-                targets = targets.to(device)
-
-                logits = model(inputs, val=True)
-                predicted = torch.argmax(logits, dim=-1)
-                total_correct += (predicted == targets).sum().item()
-                total_samples += inputs.size(0)
-
-        # 计算准确率
-        accuracy = total_correct / total_samples
-        logger.cprint(f'accuracy = {accuracy}')
-
-
-        if accuracy > best_acc:
-            best_acc = accuracy
+        if epoch == 33:
             best_epoch = epoch
 
             logger.cprint('******************Model Saved******************')
             save_dict = {
                 'model': deepcopy(model.state_dict()),
                 'best_epoch': best_epoch,
-                'best_acc': best_acc
             }
             torch.save(save_dict, os.path.join(args.log_dir, 'best_model.pth'))
+            break
 
-        logger.cprint(f'best_epoch = {best_epoch}, best_acc = {best_acc}')
+        logger.cprint(f'best_epoch = {best_epoch}')
 
         model.train()
 
@@ -403,7 +386,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay (default: 1e-4)')
 
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
-    parser.add_argument('--seed', type=int, default=3047, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=2023, help='Random seed.')
     parser.add_argument('--gpu', type=str, default='0', help='gpu id')
 
     # model pth
