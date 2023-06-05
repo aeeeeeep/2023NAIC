@@ -100,6 +100,13 @@ def noise_injection(features, noise_factor):
     noise = torch.randn_like(features) * noise_factor
     return features + noise
 
+def flip_data(data):
+    p = torch.rand(1)
+    if p < 0.5:
+        return data
+    flipped_data = torch.flip(data, dims=[0])
+    return flipped_data
+
 def shuffle_data(data):
     p = torch.rand(1)
     if p < 0.2:
@@ -144,6 +151,7 @@ class VideoDataset(Dataset):
             label = -1  # use dummy label for test set
 
         if self.transform:
+            # data = flip_data(data)
             # data = shuffle_data(data)
             data = noise_injection(data, noise_factor=0.1)
 
@@ -158,16 +166,12 @@ class MLP(nn.Module):
         self.d_input = args.d_input
         self.n_input = args.n_input
         self.output_size = args.num_classes
-        
+
+        self.lstm = nn.LSTM(input_size=self.d_input, hidden_size=self.d_input//4, num_layers=1, batch_first=True)
+
         self.layers = nn.ModuleList()
         for i in range(5):
             layer = torch.nn.Sequential(
-                torch.nn.Sequential(
-                    nn.Linear(self.d_input, self.d_input//4),
-                    nn.BatchNorm1d(50),
-                    nn.GELU(),
-                    nn.Dropout(p=0.2)
-                ),
                 torch.nn.Sequential(
                     nn.Linear(self.d_input//4, self.d_input//8),
                     nn.BatchNorm1d(50),
@@ -183,23 +187,15 @@ class MLP(nn.Module):
             )
             self.layers.append(layer)
         
-        self.senet = torch.nn.Sequential(
-                nn.Linear(50, 50//8, bias=False),
-                nn.ReLU(inplace=True),
-                nn.Linear(50//8, 50, bias=False),
-                nn.Sigmoid(),
-            )
-        self.avg_pool = nn.AdaptiveAvgPool1d(1)
-
         self.classifier1 = torch.nn.Sequential(
-                nn.Linear(self.d_input//16 * 5, self.d_input//16),
-                nn.BatchNorm1d(50),
+                nn.Linear(self.d_input//16, self.d_input//32),
+                nn.BatchNorm1d(5),
                 nn.GELU(),
                 nn.Dropout(p=0.1),
-                nn.Linear(self.d_input//16, self.d_input//32)
+                nn.Linear(self.d_input//32, self.d_input//64)
             )
 
-        self.classifier2 = nn.Linear(self.d_input//32, self.output_size)
+        self.classifier2 = nn.Linear(self.d_input//64, self.output_size)
 
         for module in self.layers:
             if isinstance(module, nn.Linear):
@@ -209,23 +205,25 @@ class MLP(nn.Module):
                 nn.init.kaiming_normal_(module.weight)
 
     def forward(self, x, val=False):
+        batch_size = x.size(0)
+        seq_len = x.size(1)
+        
+        h0 = torch.zeros(1, batch_size, self.d_input//4).to(x.device)
+        c0 = torch.zeros(1, batch_size, self.d_input//4).to(x.device)
+        x, _ = self.lstm(x, (h0, c0))
+
         data = x.split(50, dim=1)
         data = [d for d in data]
         out = []
         for i in range(5):
-            # batch_size, channels, features = data[i].size()
-            # x_i = self.avg_pool(data[i]).view(batch_size, channels)
-            # x_i = self.senet(x_i)
-            # x_i = torch.mul(x_i.view(batch_size, channels, 1), data[i])
-            # x_i = self.layers[i](x_i)
             x_i = self.layers[i](data[i])
+            x_i = x_i.mean(dim=1).unsqueeze(1)
             out.append(x_i)
-        x = torch.cat(out, dim=2)
+        x = torch.cat(out, dim=1)
         x = self.classifier1(x)
         x = x.mean(dim=1)
         logit = self.classifier2(x).squeeze(-1)
         return logit
-
 
 def train(args):
     args.device = device
@@ -240,7 +238,7 @@ def train(args):
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, shuffle=False, pin_memory=True)
 
     model = str2model(args)
-    summary(model, (250, 2048))
+    # summary(model, (250, 2048))
     model = nn.DataParallel(model, device_ids=list(range(args.num_gpu)))
     model = model.to(device)
     loss_fn = str2loss(args)
@@ -399,7 +397,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay (default: 1e-4)')
 
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
-    parser.add_argument('--seed', type=int, default=24, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=3047, help='Random seed.')
     parser.add_argument('--gpu', type=str, default='0', help='gpu id')
 
     # model pth

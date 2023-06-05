@@ -151,8 +151,8 @@ class VideoDataset(Dataset):
             label = -1  # use dummy label for test set
 
         if self.transform:
-            data = flip_data(data)
-            data = shuffle_data(data)
+            # data = flip_data(data)
+            # data = shuffle_data(data)
             data = noise_injection(data, noise_factor=0.1)
 
         return data, label
