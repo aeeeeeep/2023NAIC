@@ -11,7 +11,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchsummary import summary
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.optim.swa_utils as swa_utils
 from cleverhans.torch.attacks.fast_gradient_method import fast_gradient_method
 
 from tqdm import tqdm
@@ -167,68 +166,42 @@ class MLP(nn.Module):
         self.d_input = args.d_input
         self.n_input = args.n_input
         self.output_size = args.num_classes
-
-        self.lstm1 = nn.LSTM(input_size=self.d_input, hidden_size=self.d_input//4, num_layers=2, batch_first=True, dropout=0.2)
-
-        self.layers = nn.ModuleList()
-        for i in range(5):
-            layer = torch.nn.Sequential(
-                torch.nn.Sequential(
-                    nn.Linear(self.d_input//4, self.d_input//8),
-                    nn.BatchNorm1d(50),
-                    nn.GELU(),
-                    nn.Dropout(p=0.2)
-                ),
-                torch.nn.Sequential(
-                    nn.Linear(self.d_input//8, self.d_input//16),
-                    nn.BatchNorm1d(50),
-                    nn.GELU(),
-                    nn.Dropout(p=0.15)
-                ),
-                torch.nn.Sequential(
-                    nn.Linear(self.d_input//16, self.d_input//32),
-                    nn.BatchNorm1d(50),
-                    nn.GELU(),
-                    nn.Dropout(p=0.1)
-                ),
-            )
-            self.layers.append(layer)
-            
-        self.classifier1 = torch.nn.Sequential(
-                nn.Linear(self.d_input//32, self.d_input//64),
-                nn.BatchNorm1d(5),
-                nn.GELU(),
-            )
         
-        self.classifier2 = nn.Linear(self.d_input//64, self.output_size)
+        self.layer = torch.nn.Sequential(
+            torch.nn.Sequential(
+                nn.Linear(self.d_input, self.d_input//2),
+                nn.BatchNorm1d(250),
+                nn.GELU(),
+                nn.Dropout(p=0.2)
+            ),
+            torch.nn.Sequential(
+                nn.Linear(self.d_input//2, self.d_input//4),
+                nn.BatchNorm1d(250),
+                nn.GELU(),
+                nn.Dropout(p=0.15)
+            ),
+            torch.nn.Sequential(
+                nn.Linear(self.d_input//4, self.d_input//8),
+                nn.BatchNorm1d(250),
+                nn.GELU(),
+                nn.Dropout(p=0.1)
+            ),
+        )
 
-        for module in self.layers:
+        self.classifier1 = nn.Linear(self.d_input//8, self.output_size)
+
+        for module in self.layer:
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight)
-        for module in self.classifier1:
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight)
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight)
 
     def forward(self, x, val=False):
-        batch_size = x.size(0)
-        seq_len = x.size(1)
-        
-        h1 = torch.zeros(2, batch_size, self.d_input//4).to(x.device)
-        c1 = torch.zeros(2, batch_size, self.d_input//4).to(x.device)
-        x, _ = self.lstm1(x, (h1, c1))
-
-        data = x.split(50, dim=1)
-        data = [d for d in data]
-        out = []
-        for i in range(5):
-            x_i = self.layers[i](data[i])
-            x_i = x_i.mean(dim=1).unsqueeze(1)
-            out.append(x_i)
-        x = torch.cat(out, dim=1)
-        x = self.classifier1(x)
+        x = self.layer(x)
         x = x.mean(dim=1)
-        logit = self.classifier2(x).squeeze(-1)
+        logit = self.classifier1(x).squeeze(-1)
         return logit
+
 
 def train(args):
     args.device = device
@@ -243,7 +216,7 @@ def train(args):
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, shuffle=False, pin_memory=True)
 
     model = str2model(args)
-    # summary(model, (250, 2048))
+    summary(model, (250, 2048))
     model = nn.DataParallel(model, device_ids=list(range(args.num_gpu)))
     model = model.to(device)
     loss_fn = str2loss(args)
@@ -267,8 +240,10 @@ def train(args):
         else:
             raise RuntimeError(f'{resume_model_path} does not exist, loading failed')
 
+
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = args.lr)
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0, last_epoch=-1)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=0, last_epoch=-1)
+
 
     # Start Traning process--------------------------------------
     model.train()
@@ -276,6 +251,7 @@ def train(args):
     best_epoch = 0
     best_acc = 0.
     sep = 1e-6
+
 
     for epoch in range(start_epoch, args.epochs + 1):
 
@@ -285,8 +261,12 @@ def train(args):
         for i, (inputs, targets) in enumerate(train_dataloader):
             inputs = inputs.to(device)
             targets = targets.to(device)
+            # perturbed_inputs = fast_gradient_method(model, inputs, 0.1, np.inf)
             optimizer.zero_grad()
             logits = model(inputs)
+            # if epoch >= 20:
+            #     adv_logits = model(perturbed_inputs)
+            #     logits = (logits + adv_logits) / 2.
             loss = loss_fn(logits, targets)
 
             loss.backward()
@@ -304,7 +284,6 @@ def train(args):
         logging = f'Training results for epoch -- {epoch}: Epoch_Rec:{epoch_rec}'
         logger.cprint(logging)
         scheduler.step()
-
         model.eval()
         total_correct = 0
         total_samples = 0
@@ -389,13 +368,13 @@ if __name__ == '__main__':
 
 
     # lr_scheduler StepLR
-    parser.add_argument('--step_size', type=float, default=10, help='Decay learning rate every step_size epoches [default: 50];')
+    parser.add_argument('--step_size', type=float, default=20, help='Decay learning rate every step_size epoches [default: 50];')
     parser.add_argument('--gamma', type=float, default=0.5, help='lr decay')
     # optimizer
     parser.add_argument('--SGD', action='store_true', help='Flag to use SGD optimizer')
     parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay (default: 1e-4)')
 
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs.')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
     parser.add_argument('--seed', type=int, default=3047, help='Random seed.')
     parser.add_argument('--gpu', type=str, default='0', help='gpu id')
 
