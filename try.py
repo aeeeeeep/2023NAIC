@@ -238,7 +238,7 @@ def train(args):
 
     logger = init_logger(args.log_dir, args)
 
-    num_folds = 10
+    num_folds = 20
     all_predictions = []
 
     best_epoch = [0] * num_folds
@@ -359,7 +359,7 @@ def train(args):
         all_predictions.append(fold_predictions)  # Store predictions for this fold
 
     # Combine predictions from all folds
-    all_predictions = torch.tensor(all_predictions, dtype=torch.float32).to(device)
+    all_predictions = torch.tensor(all_predictions, dtype=torch.int).to(device)
     average_predictions, _ = torch.mode(all_predictions, dim=0)
     print(average_predictions.shape)
     predicted_result = average_predictions.tolist()
