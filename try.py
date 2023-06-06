@@ -120,29 +120,30 @@ def shuffle_data(data):
     return shuffled_data 
 
 class VideoDataset(Dataset):
-    def __init__(self, data_path, label_path=None, train=True, transform=None, val_ratio=0.2):
+    def __init__(self, data_path, label_path=None, train=True, transform=None, val_ratio=0.2, fold=0, num_folds=10):
         self.data_path = data_path
         self.transform = transform
         self.train = train
 
         self.file_list = sorted(os.listdir(self.data_path))
         n_samples = len(self.file_list)
-        split_idx = int(n_samples * val_ratio)
+        fold_size = n_samples // num_folds
+        fold_start = fold * fold_size
+        fold_end = fold_start + fold_size
+
         if train:
-            self.file_list = self.file_list[split_idx:]
+            self.file_list = self.file_list[:fold_start] + self.file_list[fold_end:]
             with open(label_path, 'r') as f:
                 labels = eval(f.read())
                 self.labels = labels
         else:
             if label_path is not None:
-                self.file_list = self.file_list[:split_idx]
+                self.file_list = self.file_list[fold_start:fold_end]
                 with open(label_path, 'r') as f:
                     labels = eval(f.read())
                 self.labels = labels
             else:
-                self.file_list = self.file_list
                 self.labels = None
-
 
     def __getitem__(self, index):
         data = torch.from_numpy(np.load(os.path.join(self.data_path, self.file_list[index]))).squeeze()
@@ -160,6 +161,7 @@ class VideoDataset(Dataset):
 
     def __len__(self):
         return len(self.file_list)
+
 
 class MLP(nn.Module):
     def __init__(self, args):
@@ -231,125 +233,136 @@ class MLP(nn.Module):
         return logit
 
 def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.device = device
+
     logger = init_logger(args.log_dir, args)
 
-    train_dataset = VideoDataset(args.data_path, args.label_path, train=True, transform=True)
-    val_dataset = VideoDataset(args.data_path, args.label_path, train=False)
-    test_dataset = VideoDataset(args.to_be_predicted, train=False)
+    num_folds = 10
+    all_predictions = []
 
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, shuffle=True, pin_memory=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size,num_workers=12, shuffle=False, pin_memory=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, shuffle=False, pin_memory=True)
+    best_epoch = [0] * num_folds
+    best_acc = [0.] * num_folds
 
-    model = str2model(args)
-    # summary(model, (250, 2048))
-    model = nn.DataParallel(model, device_ids=list(range(args.num_gpu)))
-    model = model.to(device)
-    loss_fn = str2loss(args)
-    loss_fn.to(device)
+    for fold in range(num_folds):
+        logger.cprint(f"========== Start Training for Fold [{fold + 1}/{num_folds}] ==========")
 
-    start_epoch = 1
-    if args.resume > 0:
-        logger.cprint(f'Resume previous training, start from epoch {args.resume}, loading previous model')
-        start_epoch = args.resume
-        resume_model_path = os.path.join(args.checkpoint_path, f'best_model.pth')
+        train_dataset = VideoDataset(args.data_path, args.label_path, train=True, transform=True, fold=fold, num_folds=num_folds)
+        val_dataset = VideoDataset(args.data_path, args.label_path, train=False, fold=fold, num_folds=num_folds)
+        test_dataset = VideoDataset(args.to_be_predicted, train=False, fold=fold, num_folds=num_folds)
 
-        if os.path.exists(resume_model_path):
-            model.load_state_dict(torch.load(resume_model_path)['model'])
-            for name, param in model.named_parameters():
-                if "layer" in name:
-                    param.requires_grad = False
-                if 'classifer' in name:
-                    param.requires_grad = False
-            print(model.module.classifer[0].weight)
+        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, shuffle=True, pin_memory=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=12, shuffle=False, pin_memory=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, shuffle=False, pin_memory=True)
 
-        else:
-            raise RuntimeError(f'{resume_model_path} does not exist, loading failed')
+        model = str2model(args)
+        model = nn.DataParallel(model, device_ids=list(range(args.num_gpu)))
+        model = model.to(device)
+        loss_fn = str2loss(args)
+        loss_fn.to(device)
 
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr = args.lr)
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0, last_epoch=-1)
+        start_epoch = 1
+        if args.resume > 0:
+            logger.cprint(f'Resume previous training, start from epoch {args.resume}, loading previous model')
+            start_epoch = args.resume
+            resume_model_path = os.path.join(args.checkpoint_path, f'best_model.pth')
 
-    # Start Traning process--------------------------------------
-    model.train()
-    train_batch_id = 0
-    best_epoch = 0
-    best_acc = 0.
-    sep = 1e-6
+            if os.path.exists(resume_model_path):
+                model.load_state_dict(torch.load(resume_model_path)['model'])
+                for name, param in model.named_parameters():
+                    if "layer" in name:
+                        param.requires_grad = False
+                    if 'classifer' in name:
+                        param.requires_grad = False
+            else:
+                raise RuntimeError(f'{resume_model_path} does not exist, loading failed')
 
-    for epoch in range(start_epoch, args.epochs + 1):
+        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0, last_epoch=-1)
 
-        logger.cprint(f'----------Start Training Epoch-[{epoch}/{args.epochs}]------------')
+        # Start Training process--------------------------------------
+        model.train()
+        train_batch_id = 0
 
-        ttl_rec = 0.
-        for i, (inputs, targets) in enumerate(train_dataloader):
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            optimizer.zero_grad()
-            logits = model(inputs)
-            loss = loss_fn(logits, targets)
+        for epoch in range(start_epoch, args.epochs + 1):
+            logger.cprint(f'----------Start Training Epoch-[{epoch}/{args.epochs}]------------')
 
-            loss.backward()
-            optimizer.step()
-
-            batch_rec = loss
-            ttl_rec += batch_rec
-
-            train_batch_id += 1
-
-            if (i + 1) % 100 == 0:
-                logger.cprint(f'Training Batch-[{i + 1}/{len(train_dataloader)}]:{batch_rec:.5f}')
-
-        epoch_rec = ttl_rec / len(train_dataloader)
-        logging = f'Training results for epoch -- {epoch}: Epoch_Rec:{epoch_rec}'
-        logger.cprint(logging)
-        scheduler.step()
-
-        model.eval()
-        total_correct = 0
-        total_samples = 0
-        with torch.no_grad():
-            for inputs, targets in tqdm(val_dataloader, desc='Epoch:{:d} val'.format(epoch)):
+            ttl_rec = 0.
+            for i, (inputs, targets) in enumerate(train_dataloader):
                 inputs = inputs.to(device)
                 targets = targets.to(device)
+                optimizer.zero_grad()
+                logits = model(inputs)
+                loss = loss_fn(logits, targets)
 
-                logits = model(inputs, val=True)
+                loss.backward()
+                optimizer.step()
+
+                batch_rec = loss
+                ttl_rec += batch_rec
+
+                train_batch_id += 1
+
+                if (i + 1) % 100 == 0:
+                    logger.cprint(f'Training Batch-[{i + 1}/{len(train_dataloader)}]:{batch_rec:.5f}')
+
+            epoch_rec = ttl_rec / len(train_dataloader)
+            logging = f'Training results for epoch -- {epoch}: Epoch_Rec:{epoch_rec}'
+            logger.cprint(logging)
+            scheduler.step()
+
+            model.eval()
+            total_correct = 0
+            total_samples = 0
+            with torch.no_grad():
+                for inputs, targets in tqdm(val_dataloader, desc='Epoch:{:d} val'.format(epoch)):
+                    inputs = inputs.to(device)
+                    targets = targets.to(device)
+
+                    logits = model(inputs, val=True)
+                    predicted = torch.argmax(logits, dim=-1)
+                    total_correct += (predicted == targets).sum().item()
+                    total_samples += inputs.size(0)
+
+            # Calculate accuracy
+            accuracy = total_correct / total_samples
+            logger.cprint(f'accuracy = {accuracy}')
+
+            if accuracy > best_acc[fold]:
+                best_acc[fold] = accuracy
+                best_epoch[fold] = epoch
+
+                logger.cprint('******************Model Saved******************')
+                save_dict = {
+                    'model': deepcopy(model.state_dict()),
+                    'best_epoch': best_epoch[fold],
+                    'best_acc': best_acc[fold]
+                }
+                torch.save(save_dict, os.path.join(args.log_dir, f'best_model_fold{fold}.pth'))
+
+            logger.cprint(f'best_epoch = {best_epoch[fold]}, best_acc = {best_acc[fold]}')
+
+            model.train()
+
+        # Evaluate on the test set using the best model from this fold
+        model.eval()
+        fold_predictions = []  # List to store predictions for this fold
+        with torch.no_grad():
+            for inputs, _ in tqdm(test_dataloader, desc='Test'):
+                inputs = inputs.to(device)
+                logits = model(inputs, val=False)
                 predicted = torch.argmax(logits, dim=-1)
-                total_correct += (predicted == targets).sum().item()
-                total_samples += inputs.size(0)
 
-        # 计算准确率
-        accuracy = total_correct / total_samples
-        logger.cprint(f'accuracy = {accuracy}')
+                predicted_list = predicted.tolist()
+                fold_predictions.extend(predicted_list)
 
+        all_predictions.append(fold_predictions)  # Store predictions for this fold
 
-        if accuracy > best_acc:
-            best_acc = accuracy
-            best_epoch = epoch
-
-            logger.cprint('******************Model Saved******************')
-            save_dict = {
-                'model': deepcopy(model.state_dict()),
-                'best_epoch': best_epoch,
-                'best_acc': best_acc
-            }
-            torch.save(save_dict, os.path.join(args.log_dir, 'best_model.pth'))
-
-        logger.cprint(f'best_epoch = {best_epoch}, best_acc = {best_acc}')
-
-        model.train()
-
-    model.eval()
-    model.load_state_dict(torch.load(os.path.join(args.log_dir, 'best_model.pth'))['model'])
-    predicted_result = []
-    with torch.no_grad():
-        for inputs , _ in tqdm(test_dataloader, desc='Epoch:{:d} test'.format(epoch)):
-            inputs = inputs.to(device)
-            logits = model(inputs, val=False)
-            predicted = torch.argmax(logits, dim=-1)
-
-            predicted_list = predicted.tolist()
-            predicted_result.extend(predicted_list)
+    # Combine predictions from all folds
+    all_predictions = torch.tensor(all_predictions, dtype=torch.float32).to(device)
+    average_predictions, _ = torch.mode(all_predictions, dim=0)
+    print(average_predictions.shape)
+    predicted_result = average_predictions.tolist()
 
     with open('video_dataset/submit_example.txt', 'r') as f:
         example = eval(f.read())
@@ -357,12 +370,13 @@ def train(args):
     temp_idx = 0
     for key, _ in example.items():
         example[key] = predicted_result[temp_idx]
-        temp_idx+=1
+        temp_idx += 1
 
     with open(f'{args.log_dir}/example.txt', 'w', encoding='utf-8') as f:
         json.dump(example, f)
 
     model.train()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -389,7 +403,7 @@ if __name__ == '__main__':
 
 
     # lr_scheduler StepLR
-    parser.add_argument('--step_size', type=float, default=10, help='Decay learning rate every step_size epoches [default: 50];')
+    parser.add_argument('--step_size', type=float, default=20, help='Decay learning rate every step_size epoches [default: 50];')
     parser.add_argument('--gamma', type=float, default=0.5, help='lr decay')
     # optimizer
     parser.add_argument('--SGD', action='store_true', help='Flag to use SGD optimizer')
