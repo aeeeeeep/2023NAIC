@@ -162,48 +162,54 @@ class VideoDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
-
 class MLP(nn.Module):
     def __init__(self, args):
         super(MLP, self).__init__()
         self.d_input = args.d_input
         self.n_input = args.n_input
         self.output_size = args.num_classes
-
-        self.lstm1 = nn.LSTM(input_size=self.d_input, hidden_size=self.d_input//4, num_layers=2, batch_first=True, dropout=0.2)
-
+        
         self.layers = nn.ModuleList()
         for i in range(5):
             layer = torch.nn.Sequential(
                 torch.nn.Sequential(
-                    nn.Linear(self.d_input//4, self.d_input//8),
+                    nn.Linear(self.d_input, self.d_input//4),
                     nn.BatchNorm1d(50),
                     nn.GELU(),
                     nn.Dropout(p=0.2)
                 ),
                 torch.nn.Sequential(
-                    nn.Linear(self.d_input//8, self.d_input//16),
+                    nn.Linear(self.d_input//4, self.d_input//8),
                     nn.BatchNorm1d(50),
                     nn.GELU(),
                     nn.Dropout(p=0.15)
                 ),
                 torch.nn.Sequential(
-                    nn.Linear(self.d_input//16, self.d_input//32),
+                    nn.Linear(self.d_input//8, self.d_input//16),
                     nn.BatchNorm1d(50),
                     nn.GELU(),
                     nn.Dropout(p=0.1)
                 ),
             )
             self.layers.append(layer)
-            
-        self.classifier1 = torch.nn.Sequential(
-                nn.Linear(self.d_input//32, self.d_input//64),
-                nn.BatchNorm1d(5),
-                nn.GELU(),
-            )
         
-        self.classifier2 = nn.Linear(self.d_input//64, self.output_size)
+        self.senet = torch.nn.Sequential(
+                nn.Linear(50, 50//8, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(50//8, 50, bias=False),
+                nn.Sigmoid(),
+            )
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
 
+        self.classifier1 = torch.nn.Sequential(
+                nn.Linear(self.d_input//16 * 5, self.d_input//16),
+                nn.BatchNorm1d(50),
+                nn.GELU(),
+                nn.Dropout(p=0.1),
+                nn.Linear(self.d_input//16, self.d_input//32)
+            )
+
+        self.classifier2 = nn.Linear(self.d_input//32, self.output_size)
         for module in self.layers:
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight)
@@ -212,25 +218,23 @@ class MLP(nn.Module):
                 nn.init.kaiming_normal_(module.weight)
 
     def forward(self, x, val=False):
-        batch_size = x.size(0)
-        seq_len = x.size(1)
-        
-        h1 = torch.zeros(2, batch_size, self.d_input//4).to(x.device)
-        c1 = torch.zeros(2, batch_size, self.d_input//4).to(x.device)
-        x, _ = self.lstm1(x, (h1, c1))
-
         data = x.split(50, dim=1)
         data = [d for d in data]
         out = []
         for i in range(5):
+            # batch_size, channels, features = data[i].size()
+            # x_i = self.avg_pool(data[i]).view(batch_size, channels)
+            # x_i = self.senet(x_i)
+            # x_i = torch.mul(x_i.view(batch_size, channels, 1), data[i])
+            # x_i = self.layers[i](x_i)
             x_i = self.layers[i](data[i])
-            x_i = x_i.mean(dim=1).unsqueeze(1)
             out.append(x_i)
-        x = torch.cat(out, dim=1)
+        x = torch.cat(out, dim=2)
         x = self.classifier1(x)
         x = x.mean(dim=1)
         logit = self.classifier2(x).squeeze(-1)
         return logit
+
 
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
