@@ -1,4 +1,6 @@
 video_results/
+compressed_feature_stream/
+reconstructed_feature_stream/
 __pycache__/
 .idea/
 wandb/
