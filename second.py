@@ -9,7 +9,7 @@ def get_file_basename(path: str) -> str:
 
 def read_fea(path: str) -> np.ndarray:
     with open(path, 'rb') as f:
-        fea = np.frombuffer(f.read())
+        fea = np.frombuffer(f.read(), dtype='<f4')
     return fea
 
 def evaluate(byte_rate: str):

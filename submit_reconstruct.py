@@ -10,7 +10,8 @@ def decompress_feature(path: str) -> np.ndarray:
         feature_len = int.from_bytes(f.read(4), byteorder='little', signed=False)
         fea = np.frombuffer(f.read(), dtype='<f4')
     fea = np.concatenate(
-        [fea, np.zeros(feature_len - fea.shape[0], dtype='<f4')], axis=0
+        # [fea, np.zeros(feature_len - fea.shape[0], dtype='<f4')], axis=0
+        [fea, np.ones(feature_len - fea.shape[0], dtype='<f4') * np.mean(fea)], axis=0
     )
     return fea
 
